@@ -4,7 +4,7 @@ description = "Zig support."
 version = "0.3.3"
 schema_version = 1
 authors = ["Allan Calix <contact@acx.dev>"]
-repository = "https://github.com/zed-industries/zed"
+repository = "https://github.com/zed-extensions/zig"
 
 [language_servers.zls]
 name = "zls"
