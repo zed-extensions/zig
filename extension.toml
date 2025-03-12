@@ -1,7 +1,7 @@
 id = "zig"
 name = "Zig"
 description = "Zig support."
-version = "0.3.3"
+version = "0.3.4"
 schema_version = 1
 authors = ["Allan Calix <contact@acx.dev>"]
 repository = "https://github.com/zed-extensions/zig"
