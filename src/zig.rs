@@ -1,8 +1,19 @@
+use std::collections::HashMap;
 use std::fs;
-use zed_extension_api::{self as zed, serde_json, settings::LspSettings, LanguageServerId, Result};
+use zed_extension_api::{
+    self as zed, serde_json, settings::LspSettings, LanguageServerId, Result,
+};
+use serde::Deserialize;
 
 struct ZigExtension {
-    cached_binary_path: Option<String>,
+    cached_version_map: HashMap<Option<String>, String>,
+}
+
+#[derive(Deserialize)]
+struct AssetInfo {
+    pub tarball: String,
+    pub shasum: String,
+    pub size: String,
 }
 
 #[derive(Clone)]
@@ -12,7 +23,55 @@ struct ZlsBinary {
     environment: Option<Vec<(String, String)>>,
 }
 
+fn download_zls(
+    language_server_id: &LanguageServerId,
+    binary_path: &str,
+    version_dir: &str,
+    download_url: &str,
+) -> Result<()> {
+    let (platform, _) = zed::current_platform();
+
+    zed::set_language_server_installation_status(
+        language_server_id,
+        &zed::LanguageServerInstallationStatus::Downloading,
+    );
+
+    zed::download_file(
+        download_url,
+        version_dir,
+        match platform {
+            zed::Os::Mac | zed::Os::Linux => zed::DownloadedFileType::GzipTar,
+            zed::Os::Windows => zed::DownloadedFileType::Zip,
+        },
+    )
+        .map_err(|e| format!("failed to download file: {e}"))?;
+
+    zed::make_file_executable(binary_path)?;
+
+    Ok(())
+}
+
 impl ZigExtension {
+    fn asset_from_github_latest(
+        &mut self,
+        target: &str,
+        extension: &str,
+    ) -> Result<(String, String)> {
+        // Note that in github releases and on zlstools.org the tar.gz asset is not shown
+        // but is available at https://builds.zigtools.org/zls-{os}-{arch}-{version}.tar.gz
+        let release = zed::latest_github_release(
+            "zigtools/zls",
+            zed::GithubReleaseOptions {
+                require_assets: true,
+                pre_release: false,
+            },
+        )?;
+
+        let asset_name: String = format!("zls-{}-{}.{}", target, release.version, extension);
+
+        Ok((release.version, asset_name))
+    }
+
     fn language_server_binary(
         &mut self,
         language_server_id: &LanguageServerId,
@@ -47,31 +106,6 @@ impl ZigExtension {
             });
         }
 
-        if let Some(path) = &self.cached_binary_path {
-            if fs::metadata(path).map_or(false, |stat| stat.is_file()) {
-                return Ok(ZlsBinary {
-                    path: path.clone(),
-                    args,
-                    environment,
-                });
-            }
-        }
-
-        zed::set_language_server_installation_status(
-            language_server_id,
-            &zed::LanguageServerInstallationStatus::CheckingForUpdate,
-        );
-
-        // Note that in github releases and on zlstools.org the tar.gz asset is not shown
-        // but is available at https://builds.zigtools.org/zls-{os}-{arch}-{version}.tar.gz
-        let release = zed::latest_github_release(
-            "zigtools/zls",
-            zed::GithubReleaseOptions {
-                require_assets: true,
-                pre_release: false,
-            },
-        )?;
-
         let arch: &str = match arch {
             zed::Architecture::Aarch64 => "aarch64",
             zed::Architecture::X86 => "x86",
@@ -84,49 +118,87 @@ impl ZigExtension {
             zed::Os::Windows => "windows",
         };
 
-        let extension: &str = match platform {
-            zed::Os::Mac | zed::Os::Linux => "tar.gz",
-            zed::Os::Windows => "zip",
+        let extension = match platform {
+            zed::Os::Windows => ".zip",
+            _ => ".tar.gz",
         };
 
-        let asset_name: String = format!("zls-{}-{}-{}.{}", os, arch, release.version, extension);
-        let download_url = format!("https://builds.zigtools.org/{}", asset_name);
+        zed::set_language_server_installation_status(
+            language_server_id,
+            &zed::LanguageServerInstallationStatus::CheckingForUpdate,
+        );
 
-        let version_dir = format!("zls-{}", release.version);
+        let target = format!("{}-{}", arch, os);
+
+        let zig_version = match worktree.which("zig") {
+            Some(zig_path) => {
+                let version_output = zed::Command::new(zig_path).arg("version").output()?;
+                if !matches!(version_output.status, Some(0)) {
+                    None
+                } else {
+                    let zig_version = String::try_from(version_output.stdout).unwrap();
+                    Some(zig_version)
+                }
+            },
+            None => None
+        };
+
+        if let Some(path) = self.cached_version_map.get(&zig_version) {
+            if fs::metadata(path).map_or(false, |stat| stat.is_file()) {
+                return Ok(ZlsBinary {
+                    path: path.clone(),
+                    args,
+                    environment,
+                });
+            }
+        }
+
+        let (version, download_url) = match zig_version {
+            None => {
+                 let (version, asset_name) = self.asset_from_github_latest(
+                    &target,
+                    extension
+                )?;
+
+                let download_url = format!("https://builds.zigtools.org/{}", asset_name);
+
+                (version, download_url)
+            }
+            Some(ref zig_version) => {
+                let url = format!("https://releases.zigtools.org/v1/zls/select-version?zig_version={}&compatibility=only-runtime", urlencoding::Encoded(zig_version.trim()));
+                let request = zed::http_client::HttpRequest::builder()
+                    .url(url)
+                    .build()?;
+                let resp = request.fetch()?;
+                let select: HashMap<String, serde_json::Value> = serde_json::from_slice(&resp.body)
+                    .map_err(|e| format!("failed to parse select version {e}"))?;
+
+                let version: String = serde_json::from_value(select.get("version").unwrap().clone()).map_err(|e| format!("failed to parse version {e}"))?;
+                let asset: AssetInfo = serde_json::from_value(
+                    select.get(&target).ok_or_else(|| format!("failed to find ZLS asset for {target}"))?.clone()
+                ).map_err(|e| format!("failed to parse ZLS asset for {target} {e}"))?;
+
+                // Note that in github releases and on zlstools.org the tar.gz asset is not shown
+                // but is available at https://builds.zigtools.org/zls-{os}-{arch}-{version}.tar.gz
+                let download_url = asset.tarball.replace(".tar.xz", ".tar.gz");
+
+                (version, download_url)
+            }
+        };
+
+        let version_dir = format!("zls-{}", version);
+
         let binary_path = match platform {
             zed::Os::Mac | zed::Os::Linux => format!("{version_dir}/zls"),
             zed::Os::Windows => format!("{version_dir}/zls.exe"),
         };
 
         if !fs::metadata(&binary_path).map_or(false, |stat| stat.is_file()) {
-            zed::set_language_server_installation_status(
-                language_server_id,
-                &zed::LanguageServerInstallationStatus::Downloading,
-            );
-
-            zed::download_file(
-                &download_url,
-                &version_dir,
-                match platform {
-                    zed::Os::Mac | zed::Os::Linux => zed::DownloadedFileType::GzipTar,
-                    zed::Os::Windows => zed::DownloadedFileType::Zip,
-                },
-            )
-            .map_err(|e| format!("failed to download file: {e}"))?;
-
-            zed::make_file_executable(&binary_path)?;
-
-            let entries =
-                fs::read_dir(".").map_err(|e| format!("failed to list working directory {e}"))?;
-            for entry in entries {
-                let entry = entry.map_err(|e| format!("failed to load directory entry {e}"))?;
-                if entry.file_name().to_str() != Some(&version_dir) {
-                    fs::remove_dir_all(entry.path()).ok();
-                }
-            }
+            download_zls(language_server_id, binary_path.as_str(), version_dir.as_str(), download_url.as_str())?;
         }
 
-        self.cached_binary_path = Some(binary_path.clone());
+        self.cached_version_map.insert(zig_version, binary_path.clone());
+
         Ok(ZlsBinary {
             path: binary_path,
             args,
@@ -138,7 +210,7 @@ impl ZigExtension {
 impl zed::Extension for ZigExtension {
     fn new() -> Self {
         Self {
-            cached_binary_path: None,
+            cached_version_map: HashMap::new(),
         }
     }
 
