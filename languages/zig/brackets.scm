@@ -1,3 +1,6 @@
 ("(" @open ")" @close)
 ("[" @open "]" @close)
 ("{" @open "}" @close)
+("\"" @open "\"" @close)
+(payload "|" @open "|" @close)
+("'" @open "'" @close)
