@@ -136,7 +136,8 @@ impl ZigExtension {
                 if !matches!(version_output.status, Some(0)) {
                     None
                 } else {
-                    let zig_version = String::try_from(version_output.stdout).unwrap();
+                    let zig_version = String::try_from(version_output.stdout)
+                        .map_err(|e| format!("failed to parse zig output"))?;
                     Some(zig_version)
                 }
             },
