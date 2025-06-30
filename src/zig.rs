@@ -1,9 +1,7 @@
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
-use zed_extension_api::{
-    self as zed, serde_json, settings::LspSettings, LanguageServerId, Result,
-};
-use serde::Deserialize;
+use zed_extension_api::{self as zed, serde_json, settings::LspSettings, LanguageServerId, Result};
 
 struct ZigExtension {
     cached_version_map: HashMap<Option<String>, String>,
@@ -44,7 +42,7 @@ fn download_zls(
             zed::Os::Windows => zed::DownloadedFileType::Zip,
         },
     )
-        .map_err(|e| format!("failed to download file: {e}"))?;
+    .map_err(|e| format!("failed to download file: {e}"))?;
 
     zed::make_file_executable(binary_path)?;
 
@@ -131,17 +129,18 @@ impl ZigExtension {
         let target = format!("{}-{}", arch, os);
 
         let zig_version = match worktree.which("zig") {
-            Some(zig_path) => {
-                let version_output = zed::Command::new(zig_path).arg("version").output()?;
+            Some(_zig_path) => {
+                let version_output = zed::Command::new("zig").arg("version").output()?;
                 if !matches!(version_output.status, Some(0)) {
                     None
                 } else {
-                    let zig_version = String::try_from(version_output.stdout)
-                        .map_err(|e| format!("failed to parse zig output"))?;
+                    let zig_version = String::from_utf8(version_output.stdout).map_err(|e| {
+                        format!("Failed to parse output of `zig version` command: {}", e)
+                    })?;
                     Some(zig_version)
                 }
-            },
-            None => None
+            }
+            None => None,
         };
 
         if let Some(path) = self.cached_version_map.get(&zig_version) {
@@ -156,10 +155,7 @@ impl ZigExtension {
 
         let (version, download_url) = match zig_version {
             None => {
-                 let (version, asset_name) = self.asset_from_github_latest(
-                    &target,
-                    extension
-                )?;
+                let (version, asset_name) = self.asset_from_github_latest(&target, extension)?;
 
                 let download_url = format!("https://builds.zigtools.org/{}", asset_name);
 
@@ -169,15 +165,22 @@ impl ZigExtension {
                 let url = format!("https://releases.zigtools.org/v1/zls/select-version?zig_version={}&compatibility=only-runtime", urlencoding::Encoded(zig_version.trim()));
                 let request = zed::http_client::HttpRequest::builder()
                     .url(url)
+                    .method(zed::http_client::HttpMethod::Get)
                     .build()?;
                 let resp = request.fetch()?;
                 let select: HashMap<String, serde_json::Value> = serde_json::from_slice(&resp.body)
                     .map_err(|e| format!("failed to parse select version {e}"))?;
 
-                let version: String = serde_json::from_value(select.get("version").unwrap().clone()).map_err(|e| format!("failed to parse version {e}"))?;
+                let version: String =
+                    serde_json::from_value(select.get("version").unwrap().clone())
+                        .map_err(|e| format!("failed to parse version {e}"))?;
                 let asset: AssetInfo = serde_json::from_value(
-                    select.get(&target).ok_or_else(|| format!("failed to find ZLS asset for {target}"))?.clone()
-                ).map_err(|e| format!("failed to parse ZLS asset for {target} {e}"))?;
+                    select
+                        .get(&target)
+                        .ok_or_else(|| format!("failed to find ZLS asset for {target}"))?
+                        .clone(),
+                )
+                .map_err(|e| format!("failed to parse ZLS asset for {target} {e}"))?;
 
                 // Note that in github releases and on zlstools.org the tar.gz asset is not shown
                 // but is available at https://builds.zigtools.org/zls-{os}-{arch}-{version}.tar.gz
@@ -195,10 +198,16 @@ impl ZigExtension {
         };
 
         if !fs::metadata(&binary_path).map_or(false, |stat| stat.is_file()) {
-            download_zls(language_server_id, binary_path.as_str(), version_dir.as_str(), download_url.as_str())?;
+            download_zls(
+                language_server_id,
+                binary_path.as_str(),
+                version_dir.as_str(),
+                download_url.as_str(),
+            )?;
         }
 
-        self.cached_version_map.insert(zig_version, binary_path.clone());
+        self.cached_version_map
+            .insert(zig_version, binary_path.clone());
 
         Ok(ZlsBinary {
             path: binary_path,
