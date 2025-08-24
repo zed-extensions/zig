@@ -89,7 +89,7 @@ impl ZigExtension {
             zed::Os::Windows => "zip",
         };
 
-        let asset_name: String = format!("zls-{}-{}-{}.{}", os, arch, release.version, extension);
+        let asset_name: String = format!("zls-{}-{}-{}.{}", arch, os, release.version, extension);
         let download_url = format!("https://builds.zigtools.org/{}", asset_name);
 
         let version_dir = format!("zls-{}", release.version);
