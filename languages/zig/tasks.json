@@ -1,0 +1,12 @@
+[
+  {
+    "label": "zig build run",
+    "command": "zig",
+    "args": ["build", "run"]
+  },
+  {
+    "label": "zig build test",
+    "command": "zig",
+    "args": ["build", "test"]
+  }
+]
