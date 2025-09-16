@@ -32,7 +32,6 @@
 
 (break_expression (identifier) @debug-variable)
 (continue_expression (identifier) @debug-variable)
-(if_expression (identifier) @debug-variable)
 (return_expression (identifier) @debug-variable)
 (try_expression (identifier) @debug-variable)
 
