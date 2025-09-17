@@ -194,8 +194,24 @@ impl zed::Extension for ZigExtension {
                 _ => return None,
             },
             Some(arg) if arg == "test" => {
-                // TODO handle `zig test`
-                return None;
+                // let mut args: Vec<String> = build_task.args.into_iter().collect();
+                // args.push("--test-no-exec".into());
+                // args.push(format!("-femit-bin=\"test-me.exe\""));
+                // dbg!(&args);
+                zed::BuildTaskTemplate {
+                    label: "zig test --test-no-exec".into(),
+                    command: "zig".into(),
+                    args: vec![
+                        "test".into(),
+                        "$ZED_FILE".into(),
+                        "--test-filter".into(),
+                        "'$ZED_CUSTOM_ZIG_TEST_NAME'".into(),
+                        "--test-no-exec".into(),
+                        "-femit-bin='test-me.exe'".into(),
+                    ],
+                    env,
+                    cwd,
+                }
             }
             _ => return None,
         };
@@ -224,19 +240,35 @@ impl zed::Extension for ZigExtension {
         _locator_name: String,
         build_task: zed::TaskTemplate,
     ) -> Result<zed::DebugRequest, String> {
-        // We only handle the default case where the binary name matches the project name.
-        // This is valid for projects created with `zig init`.
-        // In other cases, the user should provide a custom debug configuration.
-        let exec = get_project_name(&build_task).ok_or("Failed to get project name")?;
+        let mut args_it = build_task.args.iter();
+        match args_it.next() {
+            Some(arg) if arg == "build" => {
+                // We only handle the default case where the binary name matches the project name.
+                // This is valid for projects created with `zig init`.
+                // In other cases, the user should provide a custom debug configuration.
+                let exec = get_project_name(&build_task).ok_or("Failed to get project name")?;
 
-        let request = zed::LaunchRequest {
-            program: format!("zig-out/bin/{exec}"),
-            cwd: build_task.cwd,
-            args: vec![],
-            envs: build_task.env.into_iter().collect(),
-        };
+                let request = zed::LaunchRequest {
+                    program: format!("zig-out/bin/{exec}"),
+                    cwd: build_task.cwd,
+                    args: vec![],
+                    envs: build_task.env.into_iter().collect(),
+                };
 
-        Ok(zed::DebugRequest::Launch(request))
+                Ok(zed::DebugRequest::Launch(request))
+            }
+            Some(arg) if arg == "test" => {
+                dbg!(&build_task);
+                let request = zed::LaunchRequest {
+                    program: "test-me".into(),
+                    cwd: build_task.cwd,
+                    args: vec![],
+                    envs: build_task.env.into_iter().collect(),
+                };
+                Ok(zed::DebugRequest::Launch(request))
+            }
+            _ => Err("Unsupported build task".into()),
+        }
     }
 }
 
