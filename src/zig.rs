@@ -1,6 +1,8 @@
 use std::{fs, path::Path};
 use zed_extension_api::{self as zed, serde_json, settings::LspSettings, LanguageServerId, Result};
 
+const ZIG_TEST_EXE_NAME: &str = "zig_test";
+
 struct ZigExtension {
     cached_binary_path: Option<String>,
 }
@@ -194,17 +196,28 @@ impl zed::Extension for ZigExtension {
                 _ => return None,
             },
             Some(arg) if arg == "test" => {
-                let mut args = vec!["test".into()];
-                let mut other_args: Vec<String> = build_task
-                    .args
-                    .into_iter()
-                    .skip(1)
-                    .map(|s| format!("'{s}'"))
-                    .collect();
-                other_args.push("--test-no-exec".into());
-                other_args.push(format!("-femit-bin='test-me.exe'"));
-                args.append(&mut other_args);
-                dbg!(&args);
+                let (os, _) = zed::current_platform();
+                let test_exe_path = get_test_exe_path().unwrap();
+                let mut args = match os {
+                    zed::Os::Windows => {
+                        let mut args = vec!["test".into()];
+                        let mut other_args: Vec<String> = build_task
+                            .args
+                            .into_iter()
+                            .skip(1)
+                            .map(|s| format!("'{s}'"))
+                            .collect();
+                        args.append(&mut other_args);
+                        args
+                    }
+                    _ => build_task.args.into_iter().collect(),
+                };
+                args.push("--test-no-exec".into());
+                match os {
+                    zed::Os::Windows => args.push(format!("-femit-bin='{test_exe_path}.exe'")),
+                    _ => args.push(format!("-femit-bin={test_exe_path}")),
+                }
+
                 zed::BuildTaskTemplate {
                     label: "zig test --test-no-exec".into(),
                     command: "zig".into(),
@@ -258,9 +271,9 @@ impl zed::Extension for ZigExtension {
                 Ok(zed::DebugRequest::Launch(request))
             }
             Some(arg) if arg == "test" => {
-                dbg!(&build_task);
+                let program = get_test_exe_path().unwrap();
                 let request = zed::LaunchRequest {
-                    program: "test-me".into(),
+                    program,
                     cwd: build_task.cwd,
                     args: vec![],
                     envs: build_task.env.into_iter().collect(),
@@ -277,5 +290,29 @@ fn get_project_name(task: &zed::TaskTemplate) -> Option<String> {
         .as_ref()
         .and_then(|cwd| Some(Path::new(&cwd).file_name()?.to_string_lossy().into_owned()))
 }
+
+fn get_test_exe_path() -> Option<String> {
+    let test_exe_dir = std::env::current_dir().ok()?;
+    Some(
+        test_exe_dir
+            .join(ZIG_TEST_EXE_NAME)
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+// fn get_test_exe_path(os: zed::Os) -> Option<String> {
+//     let test_exe_dir = std::env::current_dir().ok()?;
+//     let test_exe_path = match os {
+//         zed::Os::Windows => test_exe_dir.join(format!("{ZIG_TEST_EXE_NAME}.exe")),
+//         _ => test_exe_dir.join(ZIG_TEST_EXE_NAME),
+//     };
+//     let test_exe_path = test_exe_path.to_string_lossy();
+//     let test_exe_path = match os {
+//         zed::Os::Windows => format!("'{test_exe_path}'"),
+//         _ => test_exe_path.into_owned(),
+//     };
+//     Some(test_exe_path)
+// }
 
 zed::register_extension!(ZigExtension);
