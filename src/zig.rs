@@ -227,16 +227,7 @@ impl zed::Extension for ZigExtension {
         // We only handle the default case where the binary name matches the project name.
         // This is valid for projects created with `zig init`.
         // In other cases, the user should provide a custom debug configuration.
-        let mut cwd = build_task.cwd.clone().ok_or("Missing cwd in build task")?;
-        cwd = match zed::current_platform().0 {
-            zed::Os::Windows => cwd.replace("\\", "/"),
-            _ => cwd,
-        };
-        let exec = Path::new(&cwd)
-            .file_name()
-            .ok_or_else(|| format!("Failed to extract the final component from cwd: {cwd}"))?
-            .to_string_lossy()
-            .into_owned();
+        let exec = get_project_name(&build_task).ok_or("Failed to get project name")?;
 
         let request = zed::LaunchRequest {
             program: format!("zig-out/bin/{exec}"),
@@ -247,6 +238,20 @@ impl zed::Extension for ZigExtension {
 
         Ok(zed::DebugRequest::Launch(request))
     }
+}
+
+fn get_project_cwd(task: &zed::TaskTemplate) -> Option<String> {
+    let mut cwd = task.cwd.clone()?;
+    cwd = match zed::current_platform().0 {
+        zed::Os::Windows => cwd.replace("\\", "/"),
+        _ => cwd,
+    };
+    Some(cwd)
+}
+
+fn get_project_name(task: &zed::TaskTemplate) -> Option<String> {
+    let cwd = get_project_cwd(task)?;
+    Some(Path::new(&cwd).file_name()?.to_string_lossy().into_owned())
 }
 
 zed::register_extension!(ZigExtension);
