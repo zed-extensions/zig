@@ -745,6 +745,7 @@ dependencies = [
 name = "zed_zig"
 version = "0.3.5"
 dependencies = [
+ "serde_json",
  "zed_extension_api",
 ]
 

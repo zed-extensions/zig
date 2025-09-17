@@ -1,4 +1,4 @@
-use std::fs;
+use std::{fs, path::Path};
 use zed_extension_api::{self as zed, serde_json, settings::LspSettings, LanguageServerId, Result};
 
 struct ZigExtension {
@@ -165,6 +165,87 @@ impl zed::Extension for ZigExtension {
             .and_then(|lsp_settings| lsp_settings.settings.clone())
             .unwrap_or_default();
         Ok(Some(settings))
+    }
+
+    fn dap_locator_create_scenario(
+        &mut self,
+        locator_name: String,
+        build_task: zed::TaskTemplate,
+        resolved_label: String,
+        debug_adapter_name: String,
+    ) -> Option<zed::DebugScenario> {
+        if build_task.command != "zig" {
+            return None;
+        }
+
+        let cwd = build_task.cwd.clone();
+        let env = build_task.env.clone().into_iter().collect();
+
+        let mut args_it = build_task.args.iter();
+        let template = match args_it.next() {
+            Some(arg) if arg == "build" => match args_it.next() {
+                Some(arg) if arg == "run" => zed::BuildTaskTemplate {
+                    label: "zig build".into(),
+                    command: "zig".into(),
+                    args: vec!["build".into()],
+                    env,
+                    cwd,
+                },
+                _ => return None,
+            },
+            Some(arg) if arg == "test" => {
+                // TODO handle `zig test`
+                return None;
+            }
+            _ => return None,
+        };
+
+        let config = serde_json::Value::Null;
+        let Ok(config) = serde_json::to_string(&config) else {
+            return None;
+        };
+
+        Some(zed::DebugScenario {
+            adapter: debug_adapter_name,
+            label: resolved_label.clone(),
+            config,
+            tcp_connection: None,
+            build: Some(zed::BuildTaskDefinition::Template(
+                zed::BuildTaskDefinitionTemplatePayload {
+                    template,
+                    locator_name: Some(locator_name.into()),
+                },
+            )),
+        })
+    }
+
+    fn run_dap_locator(
+        &mut self,
+        _locator_name: String,
+        build_task: zed::TaskTemplate,
+    ) -> Result<zed::DebugRequest, String> {
+        // We only handle the default case where the binary name matches the project name.
+        // This is valid for projects created with `zig init`.
+        // In other cases, the user should provide a custom debug configuration.
+        let mut cwd = build_task.cwd.clone().ok_or("Missing cwd in build task")?;
+        cwd = match zed::current_platform().0 {
+            zed::Os::Windows => cwd.replace("\\", "/"),
+            _ => cwd,
+        };
+        let exec = Path::new(&cwd)
+            .file_name()
+            .ok_or_else(|| format!("Failed to extract the final component from cwd: {cwd}"))?
+            .to_string_lossy()
+            .into_owned();
+
+        let request = zed::LaunchRequest {
+            program: format!("zig-out/bin/{exec}"),
+            cwd: build_task.cwd,
+            args: vec![],
+            envs: build_task.env.into_iter().collect(),
+        };
+
+        Ok(zed::DebugRequest::Launch(request))
     }
 }
 
