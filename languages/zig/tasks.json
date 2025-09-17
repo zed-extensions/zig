@@ -2,7 +2,8 @@
   {
     "label": "zig build run",
     "command": "zig",
-    "args": ["build", "run"]
+    "args": ["build", "run"],
+    "tags": ["zig-build-run"]
   },
   {
     "label": "zig build test",

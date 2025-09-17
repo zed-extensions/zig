@@ -2,6 +2,15 @@
 (
     (test_declaration
         (string) @name @ZIG_TEST_NAME
-    ) @run @_zig-test
+    ) @run
     (#set! tag zig-test)
+)
+
+; Tag main
+(
+    (function_declaration
+        name: (identifier) @_name
+    ) @run
+    (#match? @_name "main")
+    (#set! tag zig-build-run)
 )
