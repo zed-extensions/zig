@@ -13,7 +13,12 @@
   {
     "label": "zig test",
     "command": "zig",
-    "args": ["test", "$ZED_FILE", "--test-filter", "$ZED_CUSTOM_ZIG_TEST_NAME"],
+    "args": [
+      "test",
+      "$ZED_FILE",
+      "--test-filter",
+      "\"$ZED_CUSTOM_ZIG_TEST_NAME\""
+    ],
     "tags": ["zig-test"]
   }
 ]

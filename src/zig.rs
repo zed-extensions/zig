@@ -196,24 +196,15 @@ impl zed::Extension for ZigExtension {
                 _ => return None,
             },
             Some(arg) if arg == "test" => {
-                let (os, _) = zed::current_platform();
                 let test_exe_path = get_test_exe_path().unwrap();
-                let mut args = match os {
-                    zed::Os::Windows => {
-                        let mut args = vec!["test".into()];
-                        let mut other_args: Vec<String> = build_task
-                            .args
-                            .into_iter()
-                            .skip(1)
-                            .map(|s| format!("'{s}'"))
-                            .collect();
-                        args.append(&mut other_args);
-                        args
-                    }
-                    _ => build_task.args.into_iter().collect(),
-                };
+                let mut args: Vec<String> = build_task
+                    .args
+                    .into_iter()
+                    // TODO verify if this is required on non-Windows platforms
+                    .map(|s| s.replace("\"", "'"))
+                    .collect();
                 args.push("--test-no-exec".into());
-                match os {
+                match zed::current_platform().0 {
                     zed::Os::Windows => args.push(format!("-femit-bin='{test_exe_path}.exe'")),
                     _ => args.push(format!("-femit-bin={test_exe_path}")),
                 }
@@ -300,19 +291,5 @@ fn get_test_exe_path() -> Option<String> {
             .into_owned(),
     )
 }
-
-// fn get_test_exe_path(os: zed::Os) -> Option<String> {
-//     let test_exe_dir = std::env::current_dir().ok()?;
-//     let test_exe_path = match os {
-//         zed::Os::Windows => test_exe_dir.join(format!("{ZIG_TEST_EXE_NAME}.exe")),
-//         _ => test_exe_dir.join(ZIG_TEST_EXE_NAME),
-//     };
-//     let test_exe_path = test_exe_path.to_string_lossy();
-//     let test_exe_path = match os {
-//         zed::Os::Windows => format!("'{test_exe_path}'"),
-//         _ => test_exe_path.into_owned(),
-//     };
-//     Some(test_exe_path)
-// }
 
 zed::register_extension!(ZigExtension);
