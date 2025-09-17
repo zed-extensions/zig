@@ -194,21 +194,21 @@ impl zed::Extension for ZigExtension {
                 _ => return None,
             },
             Some(arg) if arg == "test" => {
-                // let mut args: Vec<String> = build_task.args.into_iter().collect();
-                // args.push("--test-no-exec".into());
-                // args.push(format!("-femit-bin=\"test-me.exe\""));
-                // dbg!(&args);
+                let mut args = vec!["test".into()];
+                let mut other_args: Vec<String> = build_task
+                    .args
+                    .into_iter()
+                    .skip(1)
+                    .map(|s| format!("'{s}'"))
+                    .collect();
+                other_args.push("--test-no-exec".into());
+                other_args.push(format!("-femit-bin='test-me.exe'"));
+                args.append(&mut other_args);
+                dbg!(&args);
                 zed::BuildTaskTemplate {
                     label: "zig test --test-no-exec".into(),
                     command: "zig".into(),
-                    args: vec![
-                        "test".into(),
-                        "$ZED_FILE".into(),
-                        "--test-filter".into(),
-                        "'$ZED_CUSTOM_ZIG_TEST_NAME'".into(),
-                        "--test-no-exec".into(),
-                        "-femit-bin='test-me.exe'".into(),
-                    ],
+                    args,
                     env,
                     cwd,
                 }
@@ -272,18 +272,10 @@ impl zed::Extension for ZigExtension {
     }
 }
 
-fn get_project_cwd(task: &zed::TaskTemplate) -> Option<String> {
-    let mut cwd = task.cwd.clone()?;
-    cwd = match zed::current_platform().0 {
-        zed::Os::Windows => cwd.replace("\\", "/"),
-        _ => cwd,
-    };
-    Some(cwd)
-}
-
 fn get_project_name(task: &zed::TaskTemplate) -> Option<String> {
-    let cwd = get_project_cwd(task)?;
-    Some(Path::new(&cwd).file_name()?.to_string_lossy().into_owned())
+    task.cwd
+        .as_ref()
+        .and_then(|cwd| Some(Path::new(&cwd).file_name()?.to_string_lossy().into_owned()))
 }
 
 zed::register_extension!(ZigExtension);
