@@ -1,7 +1,7 @@
 use std::{fs, path::Path};
 use zed_extension_api::{self as zed, serde_json, settings::LspSettings, LanguageServerId, Result};
 
-const ZIG_TEST_EXE_NAME: &str = "zig_test";
+const ZIG_TEST_EXE_BASENAME: &str = "zig_test";
 
 struct ZigExtension {
     cached_binary_path: Option<String>,
@@ -204,10 +204,7 @@ impl zed::Extension for ZigExtension {
                     .map(|s| s.replace("\"", "'"))
                     .collect();
                 args.push("--test-no-exec".into());
-                match zed::current_platform().0 {
-                    zed::Os::Windows => args.push(format!("-femit-bin='{test_exe_path}.exe'")),
-                    _ => args.push(format!("-femit-bin={test_exe_path}")),
-                }
+                args.push(format!("-femit-bin={test_exe_path}"));
 
                 zed::BuildTaskTemplate {
                     label: "zig test --test-no-exec".into(),
@@ -262,7 +259,18 @@ impl zed::Extension for ZigExtension {
                 Ok(zed::DebugRequest::Launch(request))
             }
             Some(arg) if arg == "test" => {
-                let program = get_test_exe_path().unwrap();
+                let program = build_task
+                    .args
+                    .iter()
+                    .find_map(|arg| {
+                        if arg.starts_with("-femit-bin=") {
+                            let path = arg.split("=").nth(1).unwrap().trim_end_matches(".exe");
+                            Some(path.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap();
                 let request = zed::LaunchRequest {
                     program,
                     cwd: build_task.cwd,
@@ -284,12 +292,15 @@ fn get_project_name(task: &zed::TaskTemplate) -> Option<String> {
 
 fn get_test_exe_path() -> Option<String> {
     let test_exe_dir = std::env::current_dir().ok()?;
-    Some(
-        test_exe_dir
-            .join(ZIG_TEST_EXE_NAME)
-            .to_string_lossy()
-            .into_owned(),
-    )
+    let mut name = format!(
+        "{}_{}",
+        ZIG_TEST_EXE_BASENAME,
+        uuid::Uuid::new_v4().to_string()
+    );
+    if zed::current_platform().0 == zed::Os::Windows {
+        name.push_str(".exe");
+    }
+    Some(test_exe_dir.join(name).to_string_lossy().into_owned())
 }
 
 zed::register_extension!(ZigExtension);
