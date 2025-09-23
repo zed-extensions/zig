@@ -263,14 +263,16 @@ impl zed::Extension for ZigExtension {
                     .args
                     .iter()
                     .find_map(|arg| {
-                        if arg.starts_with("-femit-bin=") {
-                            let path = arg.split("=").nth(1).unwrap().trim_end_matches(".exe");
-                            Some(path.to_string())
-                        } else {
-                            None
-                        }
+                        arg.strip_prefix("-femit-bin=").map(|arg| {
+                            arg.split("=")
+                                .nth(1)
+                                .ok_or("Expected binary path in -femit-bin=")
+                                .map(|path| path.trim_end_matches(".exe"))
+                        })
                     })
-                    .unwrap();
+                    .ok_or("Failed to extract binary path from command args")
+                    .flatten()?
+                    .to_string();
                 let request = zed::LaunchRequest {
                     program,
                     cwd: build_task.cwd,
