@@ -1,7 +1,7 @@
 ; Tag unit tests
 (
     (test_declaration
-        (string) @name @ZIG_TEST_NAME
+        (string (string_content) @name @ZIG_TEST_NAME)
     ) @run
     (#set! tag zig-test)
 )
