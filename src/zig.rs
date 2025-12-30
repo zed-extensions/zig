@@ -214,6 +214,13 @@ impl zed::Extension for ZigExtension {
                     cwd,
                 }
             }
+            Some(arg) if arg == "run" => zed::BuildTaskTemplate {
+                label: "zig run".into(),
+                command: "zig".into(),
+                args: vec!["run".into()],
+                env,
+                cwd,
+            },
             _ => return None,
         };
 

@@ -13,4 +13,5 @@
     ) @run
     (#match? @_name "main")
     (#set! tag zig-build-run)
+    (#set! tag zig-run)
 )
