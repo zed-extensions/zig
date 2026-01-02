@@ -90,7 +90,7 @@
     member: (identifier) @function.call))
 
 (function_declaration
-  name: (identifier) @function)
+  name: (identifier) @function.definition)
 
 ; Modules
 
