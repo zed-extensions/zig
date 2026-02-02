@@ -294,11 +294,7 @@ fn get_project_name(task: &zed::TaskTemplate) -> Option<String> {
 
 fn get_test_exe_path() -> Option<String> {
     let test_exe_dir = std::env::current_dir().ok()?;
-    let mut name = format!(
-        "{}_{}",
-        ZIG_TEST_EXE_BASENAME,
-        uuid::Uuid::new_v4()
-    );
+    let mut name = format!("{}_{}", ZIG_TEST_EXE_BASENAME, uuid::Uuid::new_v4());
     if zed::current_platform().0 == zed::Os::Windows {
         name.push_str(".exe");
     }
