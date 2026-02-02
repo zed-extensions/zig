@@ -50,7 +50,7 @@ impl ZigExtension {
         }
 
         if let Some(path) = &self.cached_binary_path {
-            if fs::metadata(path).map_or(false, |stat| stat.is_file()) {
+            if fs::metadata(path).is_ok_and(|stat| stat.is_file()) {
                 return Ok(ZlsBinary {
                     path: path.clone(),
                     args,
@@ -100,7 +100,7 @@ impl ZigExtension {
             zed::Os::Windows => format!("{version_dir}/zls.exe"),
         };
 
-        if !fs::metadata(&binary_path).map_or(false, |stat| stat.is_file()) {
+        if !fs::metadata(&binary_path).is_ok_and(|stat| stat.is_file()) {
             zed::set_language_server_installation_status(
                 language_server_id,
                 &zed::LanguageServerInstallationStatus::Downloading,
@@ -230,7 +230,7 @@ impl zed::Extension for ZigExtension {
             build: Some(zed::BuildTaskDefinition::Template(
                 zed::BuildTaskDefinitionTemplatePayload {
                     template,
-                    locator_name: Some(locator_name.into()),
+                    locator_name: Some(locator_name),
                 },
             )),
         })
@@ -297,7 +297,7 @@ fn get_test_exe_path() -> Option<String> {
     let mut name = format!(
         "{}_{}",
         ZIG_TEST_EXE_BASENAME,
-        uuid::Uuid::new_v4().to_string()
+        uuid::Uuid::new_v4()
     );
     if zed::current_platform().0 == zed::Os::Windows {
         name.push_str(".exe");
