@@ -6,6 +6,12 @@
     "tags": ["zig-build-run"]
   },
   {
+    "label": "zig run",
+    "command": "zig",
+    "args": ["run", "$ZED_FILE"],
+    "tags": ["zig-run"]
+  },
+  {
     "label": "zig build test",
     "command": "zig",
     "args": ["build", "test"]
