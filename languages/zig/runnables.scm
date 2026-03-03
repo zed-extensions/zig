@@ -8,4 +8,5 @@
 ((function_declaration
   name: (identifier) @_name) @run
   (#match? @_name "main")
-  (#set! tag zig-build-run))
+  (#set! tag zig-build-run)
+  (#set! tag zig-run))
