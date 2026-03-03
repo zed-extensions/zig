@@ -1,11 +1,11 @@
-(test_declaration 
+(test_declaration
   "test" @context
   [
-   (string)
-   (identifier)
-   ] @name) @item
+    (string)
+    (identifier)
+  ] @name) @item
 
-(function_declaration 
+(function_declaration
   "pub"? @context
   [
     "extern"
@@ -20,31 +20,37 @@
   (variable_declaration
     "pub"? @context
     (identifier) @name
-    "=" (_) @context) @item)
+    "="
+    (_) @context) @item)
 
 (struct_declaration
   (variable_declaration
     "pub"? @context
     (identifier) @name
-    "=" (_) @context) @item)
+    "="
+    (_) @context) @item)
 
 (union_declaration
   (variable_declaration
     "pub"? @context
     (identifier) @name
-    "=" (_) @context) @item)
+    "="
+    (_) @context) @item)
 
 (enum_declaration
   (variable_declaration
     "pub"? @context
     (identifier) @name
-    "=" (_) @context) @item)
+    "="
+    (_) @context) @item)
 
 (opaque_declaration
   (variable_declaration
     "pub"? @context
     (identifier) @name
-    "=" (_) @context) @item)
+    "="
+    (_) @context) @item)
 
 (container_field
-  . (_) @name) @item
+  .
+  (_) @name) @item

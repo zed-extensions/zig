@@ -1,14 +1,11 @@
 ; Variables
-
 (identifier) @variable
 
 ; Parameters
-
 (parameter
   name: (identifier) @variable.parameter)
 
 ; Types
-
 (parameter
   type: (identifier) @type)
 
@@ -31,7 +28,6 @@
 ] @type.builtin
 
 ; Constants
-
 ((identifier) @constant
   (#match? @constant "^[A-Z][A-Z_0-9]+$"))
 
@@ -50,13 +46,13 @@
     type: (identifier) @constant))
 
 ; Labels
+(block_label
+  (identifier) @label)
 
-(block_label (identifier) @label)
-
-(break_label (identifier) @label)
+(break_label
+  (identifier) @label)
 
 ; Fields
-
 (field_initializer
   .
   (identifier) @variable.member)
@@ -67,19 +63,19 @@
 
 (field_expression
   (_)
-  member: (identifier) @type (#match? @type "^[A-Z_][a-zA-Z0-9_]*"))
+  member: (identifier) @type
+  (#match? @type "^[A-Z_][a-zA-Z0-9_]*"))
 
 (container_field
   name: (identifier) @property)
 
 (initializer_list
   (assignment_expression
-      left: (field_expression
-              .
-              member: (identifier) @property)))
+    left: (field_expression
+      .
+      member: (identifier) @property)))
 
 ; Functions
-
 (builtin_identifier) @function.builtin
 
 (call_expression
@@ -93,7 +89,6 @@
   name: (identifier) @function.definition)
 
 ; Modules
-
 (variable_declaration
   (identifier) @module
   (builtin_function
@@ -101,7 +96,6 @@
     (#any-of? @keyword.import "@import" "@cImport")))
 
 ; Builtins
-
 [
   "c"
   "..."
@@ -114,7 +108,6 @@
   (identifier) @variable.builtin)
 
 ; Keywords
-
 [
   "asm"
   "defer"
@@ -191,7 +184,6 @@
 ] @keyword.modifier
 
 ; Operator
-
 [
   "="
   "*="
@@ -248,7 +240,6 @@
 ] @operator
 
 ; Literals
-
 (character) @string
 
 ([
@@ -266,7 +257,6 @@
 (escape_sequence) @string.escape
 
 ; Punctuation
-
 [
   "["
   "]"
@@ -285,10 +275,10 @@
   "->"
 ] @punctuation.delimiter
 
-(payload "|" @punctuation.bracket)
+(payload
+  "|" @punctuation.bracket)
 
 ; Comments
-
 (comment) @comment
 
 ((comment) @comment.documentation
