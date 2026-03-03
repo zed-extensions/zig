@@ -1,20 +1,23 @@
 (function_declaration
-    body: (_
-        "{"
-        (_)* @function.inside
-        "}")) @function.around
+  body: (_
+    "{"
+    (_)* @function.inside
+    "}")) @function.around
 
 (test_declaration
-    (block
-        "{"
-        (_)* @function.inside
-        "}")) @function.around
+  (block
+    "{"
+    (_)* @function.inside
+    "}")) @function.around
 
 (variable_declaration
   (struct_declaration
     "struct"
     "{"
-    [(_) ","]* @class.inside
+    [
+      (_)
+      ","
+    ]* @class.inside
     "}")) @class.around
 
 (variable_declaration
