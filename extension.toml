@@ -1,13 +1,13 @@
 id = "zig"
 name = "Zig"
 description = "Zig support."
-version = "0.4.2"
+version = "0.5.0"
 schema_version = 1
 authors = ["Allan Calix <contact@acx.dev>"]
 repository = "https://github.com/zed-extensions/zig"
 
-[language_servers.zls]
-name = "zls"
+[language_servers.zigscient]
+name = "zigscient"
 language = "Zig"
 
 [grammars.zig]

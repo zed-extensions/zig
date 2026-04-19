@@ -1,139 +1,74 @@
-use std::{fs, path::Path};
-use zed_extension_api::{self as zed, serde_json, settings::LspSettings, LanguageServerId, Result};
+mod config;
+mod labels;
+mod util;
+mod zigscient;
 
-const ZIG_TEST_EXE_BASENAME: &str = "zig_test";
+use std::path::PathBuf;
+
+use zed_extension_api::{
+    self as zed, CodeLabel, LanguageServerId, Result,
+    lsp::{Completion, Symbol},
+    register_extension, serde_json,
+    settings::LspSettings,
+};
+
+use crate::{
+    config::{get_binary_path, get_check_updates},
+    labels::{label_for_completion as zig_label_completion, label_for_symbol as zig_label_symbol},
+    util::path_to_string,
+};
 
 struct ZigExtension {
-    cached_binary_path: Option<String>,
-}
-
-#[derive(Clone)]
-struct ZlsBinary {
-    path: String,
-    args: Option<Vec<String>>,
-    environment: Option<Vec<(String, String)>>,
+    cached_binary_path: Option<PathBuf>,
 }
 
 impl ZigExtension {
-    fn language_server_binary(
+    fn language_server_binary_path(
         &mut self,
         language_server_id: &LanguageServerId,
         worktree: &zed::Worktree,
-    ) -> Result<ZlsBinary> {
-        let mut args: Option<Vec<String>> = None;
+    ) -> Result<PathBuf> {
+        let configuration = LspSettings::for_worktree("zigscient", worktree)
+            .ok()
+            .and_then(|s| s.settings);
 
-        let (platform, arch) = zed::current_platform();
-        let environment = match platform {
-            zed::Os::Mac | zed::Os::Linux => Some(worktree.shell_env()),
-            zed::Os::Windows => None,
-        };
+        // 1. Explicit path from workspace settings (`zigscient_path`).
+        if let Some(user_path) = get_binary_path(&configuration, worktree) {
+            let p = PathBuf::from(user_path);
+            self.cached_binary_path = Some(p.clone());
+            return Ok(p);
+        }
 
-        if let Ok(lsp_settings) = LspSettings::for_worktree("zls", worktree) {
-            if let Some(binary) = lsp_settings.binary {
-                args = binary.arguments;
-                if let Some(path) = binary.path {
-                    return Ok(ZlsBinary {
-                        path: path.clone(),
-                        args,
-                        environment,
-                    });
-                }
+        // 2. Explicit binary path via `lsp.zigscient.binary.path`.
+        if let Ok(lsp_settings) = LspSettings::for_worktree("zigscient", worktree) {
+            if let Some(binary) = lsp_settings.binary
+                && let Some(path) = binary.path
+            {
+                let p = PathBuf::from(&path);
+                self.cached_binary_path = Some(p.clone());
+                return Ok(p);
             }
         }
 
-        if let Some(path) = worktree.which("zls") {
-            return Ok(ZlsBinary {
-                path,
-                args,
-                environment,
-            });
+        // 3. zigscient already on PATH.
+        if let Some(path) = worktree.which("zigscient") {
+            let p = PathBuf::from(path);
+            self.cached_binary_path = Some(p.clone());
+            return Ok(p);
         }
 
-        if let Some(path) = &self.cached_binary_path {
-            if fs::metadata(path).is_ok_and(|stat| stat.is_file()) {
-                return Ok(ZlsBinary {
-                    path: path.clone(),
-                    args,
-                    environment,
-                });
+        // 4. Reuse a previously resolved path if it is still runnable.
+        if let Some(cached) = self.cached_binary_path.clone() {
+            if zigscient::is_runnable(&cached) {
+                return Ok(cached);
             }
         }
 
-        zed::set_language_server_installation_status(
-            language_server_id,
-            &zed::LanguageServerInstallationStatus::CheckingForUpdate,
-        );
-
-        // Note that in github releases and on zlstools.org the tar.gz asset is not shown
-        // but is available at https://builds.zigtools.org/zls-{os}-{arch}-{version}.tar.gz
-        let release = zed::latest_github_release(
-            "zigtools/zls",
-            zed::GithubReleaseOptions {
-                require_assets: true,
-                pre_release: false,
-            },
-        )?;
-
-        let arch: &str = match arch {
-            zed::Architecture::Aarch64 => "aarch64",
-            zed::Architecture::X86 => "x86",
-            zed::Architecture::X8664 => "x86_64",
-        };
-
-        let os: &str = match platform {
-            zed::Os::Mac => "macos",
-            zed::Os::Linux => "linux",
-            zed::Os::Windows => "windows",
-        };
-
-        let extension: &str = match platform {
-            zed::Os::Mac | zed::Os::Linux => "tar.gz",
-            zed::Os::Windows => "zip",
-        };
-
-        let asset_name: String = format!("zls-{}-{}-{}.{}", arch, os, release.version, extension);
-        let download_url = format!("https://builds.zigtools.org/{}", asset_name);
-
-        let version_dir = format!("zls-{}", release.version);
-        let binary_path = match platform {
-            zed::Os::Mac | zed::Os::Linux => format!("{version_dir}/zls"),
-            zed::Os::Windows => format!("{version_dir}/zls.exe"),
-        };
-
-        if !fs::metadata(&binary_path).is_ok_and(|stat| stat.is_file()) {
-            zed::set_language_server_installation_status(
-                language_server_id,
-                &zed::LanguageServerInstallationStatus::Downloading,
-            );
-
-            zed::download_file(
-                &download_url,
-                &version_dir,
-                match platform {
-                    zed::Os::Mac | zed::Os::Linux => zed::DownloadedFileType::GzipTar,
-                    zed::Os::Windows => zed::DownloadedFileType::Zip,
-                },
-            )
-            .map_err(|e| format!("failed to download file: {e}"))?;
-
-            zed::make_file_executable(&binary_path)?;
-
-            let entries =
-                fs::read_dir(".").map_err(|e| format!("failed to list working directory {e}"))?;
-            for entry in entries {
-                let entry = entry.map_err(|e| format!("failed to load directory entry {e}"))?;
-                if entry.file_name().to_str() != Some(&version_dir) {
-                    fs::remove_dir_all(entry.path()).ok();
-                }
-            }
-        }
-
-        self.cached_binary_path = Some(binary_path.clone());
-        Ok(ZlsBinary {
-            path: binary_path,
-            args,
-            environment,
-        })
+        // 5. Download from GitHub releases.
+        let check_updates = get_check_updates(&configuration);
+        let path = zigscient::resolve_binary(language_server_id, check_updates)?;
+        self.cached_binary_path = Some(path.clone());
+        Ok(path)
     }
 }
 
@@ -149,24 +84,52 @@ impl zed::Extension for ZigExtension {
         language_server_id: &LanguageServerId,
         worktree: &zed::Worktree,
     ) -> Result<zed::Command> {
-        let zls_binary = self.language_server_binary(language_server_id, worktree)?;
+        let binary_path = self.language_server_binary_path(language_server_id, worktree)?;
+
+        let args = LspSettings::for_worktree("zigscient", worktree)
+            .ok()
+            .and_then(|s| s.binary)
+            .and_then(|b| b.arguments)
+            .unwrap_or_default();
+
+        let env = match zed::current_platform().0 {
+            zed::Os::Mac | zed::Os::Linux => worktree.shell_env(),
+            zed::Os::Windows => vec![],
+        };
+
         Ok(zed::Command {
-            command: zls_binary.path,
-            args: zls_binary.args.unwrap_or_default(),
-            env: zls_binary.environment.unwrap_or_default(),
+            command: path_to_string(&binary_path)?,
+            args,
+            env,
         })
     }
 
     fn language_server_workspace_configuration(
         &mut self,
-        _language_server_id: &zed::LanguageServerId,
+        _language_server_id: &LanguageServerId,
         worktree: &zed::Worktree,
     ) -> Result<Option<serde_json::Value>> {
-        let settings = LspSettings::for_worktree("zls", worktree)
+        let settings = LspSettings::for_worktree("zigscient", worktree)
             .ok()
-            .and_then(|lsp_settings| lsp_settings.settings.clone())
+            .and_then(|s| s.settings)
             .unwrap_or_default();
         Ok(Some(settings))
+    }
+
+    fn label_for_completion(
+        &self,
+        language_server_id: &LanguageServerId,
+        completion: Completion,
+    ) -> Option<CodeLabel> {
+        zig_label_completion(language_server_id, completion)
+    }
+
+    fn label_for_symbol(
+        &self,
+        language_server_id: &LanguageServerId,
+        symbol: Symbol,
+    ) -> Option<CodeLabel> {
+        zig_label_symbol(language_server_id, symbol)
     }
 
     fn dap_locator_create_scenario(
@@ -181,57 +144,56 @@ impl zed::Extension for ZigExtension {
         }
 
         let cwd = build_task.cwd.clone();
-        let env = build_task.env.clone().into_iter().collect();
+        let env: Vec<(String, String)> = build_task.env.clone().into_iter().collect();
 
         let mut args_it = build_task.args.iter();
-        let template = match args_it.next() {
-            Some(arg) if arg == "build" => match args_it.next() {
-                Some(arg) if arg == "run" => zed::BuildTaskTemplate {
-                    label: "zig build".into(),
+        let template = match args_it.next().map(String::as_str) {
+            Some("build") => match args_it.next().map(String::as_str) {
+                Some("run") => zed::BuildTaskTemplate {
+                    label: "zig build run".into(),
                     command: "zig".into(),
-                    args: vec!["build".into()],
+                    args: vec!["build".into(), "run".into()],
                     env,
                     cwd,
                 },
                 _ => return None,
             },
-            Some(arg) if arg == "test" => {
-                let test_exe_path = get_test_exe_path().unwrap();
+
+            Some("test") => {
+                let test_exe_path = make_test_exe_path()?;
                 let mut args: Vec<String> = build_task
                     .args
                     .into_iter()
-                    // TODO verify if this is required on non-Windows platforms
-                    .map(|s| s.replace("\"", "'"))
+                    .map(|s| s.replace('"', "'"))
                     .collect();
                 args.push("--test-no-exec".into());
                 args.push(format!("-femit-bin={test_exe_path}"));
 
                 zed::BuildTaskTemplate {
-                    label: "zig test --test-no-exec".into(),
+                    label: "zig test (no-exec)".into(),
                     command: "zig".into(),
                     args,
                     env,
                     cwd,
                 }
             }
-            Some(arg) if arg == "run" => zed::BuildTaskTemplate {
+
+            Some("run") => zed::BuildTaskTemplate {
                 label: "zig run".into(),
                 command: "zig".into(),
                 args: vec!["run".into()],
                 env,
                 cwd,
             },
+
             _ => return None,
         };
 
-        let config = serde_json::Value::Null;
-        let Ok(config) = serde_json::to_string(&config) else {
-            return None;
-        };
+        let config = serde_json::to_string(&serde_json::Value::Null).ok()?;
 
         Some(zed::DebugScenario {
             adapter: debug_adapter_name,
-            label: resolved_label.clone(),
+            label: resolved_label,
             config,
             tcp_connection: None,
             build: Some(zed::BuildTaskDefinition::Template(
@@ -248,64 +210,58 @@ impl zed::Extension for ZigExtension {
         _locator_name: String,
         build_task: zed::TaskTemplate,
     ) -> Result<zed::DebugRequest, String> {
-        let mut args_it = build_task.args.iter();
-        match args_it.next() {
-            Some(arg) if arg == "build" => {
-                // We only handle the default case where the binary name matches the project name.
-                // This is valid for projects created with `zig init`.
-                // In other cases, the user should provide a custom debug configuration.
-                let exec = get_project_name(&build_task).ok_or("Failed to get project name")?;
+        match build_task.args.first().map(String::as_str) {
+            Some("build") => {
+                let exec = project_name_from_task(&build_task)
+                    .ok_or("Failed to determine project name from cwd")?;
 
-                let request = zed::LaunchRequest {
+                Ok(zed::DebugRequest::Launch(zed::LaunchRequest {
                     program: format!("zig-out/bin/{exec}"),
                     cwd: build_task.cwd,
                     args: vec![],
                     envs: build_task.env.into_iter().collect(),
-                };
-
-                Ok(zed::DebugRequest::Launch(request))
+                }))
             }
-            Some(arg) if arg == "test" => {
+
+            Some("test") => {
+                // The build step emits the test binary via `-femit-bin=<path>`;
+                // extract that path and strip any trailing ".exe".
                 let program = build_task
                     .args
                     .iter()
-                    .find_map(|arg| {
-                        arg.strip_prefix("-femit-bin=").map(|arg| {
-                            arg.split("=")
-                                .nth(1)
-                                .ok_or("Expected binary path in -femit-bin=")
-                                .map(|path| path.trim_end_matches(".exe"))
-                        })
-                    })
-                    .ok_or("Failed to extract binary path from command args")
-                    .flatten()?
-                    .to_string();
-                let request = zed::LaunchRequest {
+                    .find_map(|arg| arg.strip_prefix("-femit-bin="))
+                    .map(|path| path.trim_end_matches(".exe").to_string())
+                    .ok_or("Could not extract test binary path from -femit-bin= argument")?;
+
+                Ok(zed::DebugRequest::Launch(zed::LaunchRequest {
                     program,
                     cwd: build_task.cwd,
                     args: vec![],
                     envs: build_task.env.into_iter().collect(),
-                };
-                Ok(zed::DebugRequest::Launch(request))
+                }))
             }
-            _ => Err("Unsupported build task".into()),
+
+            _ => Err("Unsupported zig sub-command for DAP locator".into()),
         }
     }
 }
 
-fn get_project_name(task: &zed::TaskTemplate) -> Option<String> {
+fn project_name_from_task(task: &zed::TaskTemplate) -> Option<String> {
+    use std::path::Path;
     task.cwd
-        .as_ref()
-        .and_then(|cwd| Some(Path::new(&cwd).file_name()?.to_string_lossy().into_owned()))
+        .as_deref()
+        .and_then(|cwd| Path::new(cwd).file_name())
+        .map(|n| n.to_string_lossy().into_owned())
 }
 
-fn get_test_exe_path() -> Option<String> {
-    let test_exe_dir = std::env::current_dir().ok()?;
-    let mut name = format!("{}_{}", ZIG_TEST_EXE_BASENAME, uuid::Uuid::new_v4());
+/// Generates a unique path for the test binary relative to the extension's
+/// working directory (avoids needing `std::env::current_dir`).
+fn make_test_exe_path() -> Option<String> {
+    let mut name = format!("zig_test_{}", uuid::Uuid::new_v4());
     if zed::current_platform().0 == zed::Os::Windows {
         name.push_str(".exe");
     }
-    Some(test_exe_dir.join(name).to_string_lossy().into_owned())
+    Some(name)
 }
 
-zed::register_extension!(ZigExtension);
+register_extension!(ZigExtension);
