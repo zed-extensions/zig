@@ -266,19 +266,14 @@ impl zed::Extension for ZigExtension {
                 Ok(zed::DebugRequest::Launch(request))
             }
             Some(arg) if arg == "test" => {
+                // `strip_prefix` already yields the bare path, so the subsequent
+                // `split("=").nth(1)` was always `None` for paths without a `=`.
                 let program = build_task
                     .args
                     .iter()
-                    .find_map(|arg| {
-                        arg.strip_prefix("-femit-bin=").map(|arg| {
-                            arg.split("=")
-                                .nth(1)
-                                .ok_or("Expected binary path in -femit-bin=")
-                                .map(|path| path.trim_end_matches(".exe"))
-                        })
-                    })
-                    .ok_or("Failed to extract binary path from command args")
-                    .flatten()?
+                    .find_map(|arg| arg.strip_prefix("-femit-bin="))
+                    .ok_or("Failed to extract binary path from command args")?
+                    .trim_end_matches(".exe")
                     .to_string();
                 let request = zed::LaunchRequest {
                     program,
