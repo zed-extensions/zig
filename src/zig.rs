@@ -200,8 +200,10 @@ impl zed::Extension for ZigExtension {
                 let mut args: Vec<String> = build_task
                     .args
                     .into_iter()
-                    // TODO verify if this is required on non-Windows platforms
-                    .map(|s| s.replace("\"", "'"))
+                    // The build task is spawned without a shell, so the quotes around
+                    // $ZED_CUSTOM_ZIG_TEST_NAME reach --test-filter literally and match
+                    // no test at all. Drop them; each arg is already one argv element.
+                    .map(|s| s.replace('"', ""))
                     .collect();
                 args.push("--test-no-exec".into());
                 args.push(format!("-femit-bin={test_exe_path}"));
