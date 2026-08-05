@@ -200,8 +200,10 @@ impl zed::Extension for ZigExtension {
                 let mut args: Vec<String> = build_task
                     .args
                     .into_iter()
-                    // TODO verify if this is required on non-Windows platforms
-                    .map(|s| s.replace("\"", "'"))
+                    // The build task is spawned without a shell, so the quotes around
+                    // $ZED_CUSTOM_ZIG_TEST_NAME reach --test-filter literally and match
+                    // no test at all. Drop them; each arg is already one argv element.
+                    .map(|s| s.replace('"', ""))
                     .collect();
                 args.push("--test-no-exec".into());
                 args.push(format!("-femit-bin={test_exe_path}"));
@@ -266,19 +268,14 @@ impl zed::Extension for ZigExtension {
                 Ok(zed::DebugRequest::Launch(request))
             }
             Some(arg) if arg == "test" => {
+                // `strip_prefix` already yields the bare path, so the subsequent
+                // `split("=").nth(1)` was always `None` for paths without a `=`.
                 let program = build_task
                     .args
                     .iter()
-                    .find_map(|arg| {
-                        arg.strip_prefix("-femit-bin=").map(|arg| {
-                            arg.split("=")
-                                .nth(1)
-                                .ok_or("Expected binary path in -femit-bin=")
-                                .map(|path| path.trim_end_matches(".exe"))
-                        })
-                    })
-                    .ok_or("Failed to extract binary path from command args")
-                    .flatten()?
+                    .find_map(|arg| arg.strip_prefix("-femit-bin="))
+                    .ok_or("Failed to extract binary path from command args")?
+                    .trim_end_matches(".exe")
                     .to_string();
                 let request = zed::LaunchRequest {
                     program,
