@@ -224,7 +224,38 @@ impl zed::Extension for ZigExtension {
             _ => return None,
         };
 
-        let config = serde_json::Value::Null;
+        // Load Zig's LLDB pretty printers (structured display of slices, ArrayList,
+        // optionals, ... in the Variables panel). The script is bundled with the
+        // extension and materialized into the extension's work directory, which is
+        // the wasm sandbox's cwd; the import path below is the host location of
+        // that directory. If anything fails, LLDB only logs an error in the debug
+        // console and the session works as before.
+        let config = if debug_adapter_name == "CodeLLDB" {
+            let _ = std::fs::write(
+                "lldb_pretty_printers.py",
+                include_str!("../lldb_pretty_printers.py"),
+            );
+            let work_dir = match zed::current_platform().0 {
+                zed::Os::Mac => "~/Library/Application Support/Zed/extensions/work/zig",
+                zed::Os::Linux => "~/.local/share/zed/extensions/work/zig",
+                zed::Os::Windows => "~/AppData/Local/Zed/extensions/work/zig",
+            };
+            // Routed through `script` + HandleCommand: a failed initCommand aborts
+            // the whole launch in CodeLLDB, while HandleCommand only prints the
+            // error, so a missing/broken script can never take down the session.
+            serde_json::json!({
+                "initCommands": [
+                    format!(
+                        "script \
+                        lldb.debugger.HandleCommand('command script import \"{work_dir}/lldb_pretty_printers.py\"'); \
+                        lldb.debugger.HandleCommand('type category enable zig.lang'); \
+                        lldb.debugger.HandleCommand('type category enable zig.std')"
+                    ),
+                ],
+            })
+        } else {
+            serde_json::Value::Null
+        };
         let Ok(config) = serde_json::to_string(&config) else {
             return None;
         };
