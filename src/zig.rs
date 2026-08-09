@@ -300,12 +300,20 @@ fn get_project_name(task: &zed::TaskTemplate) -> Option<String> {
 }
 
 fn get_test_exe_path() -> Option<String> {
-    let test_exe_dir = std::env::current_dir().ok()?;
-    let mut name = format!("{}_{}", ZIG_TEST_EXE_BASENAME, uuid::Uuid::new_v4());
+    // Relative to the build task's cwd (the worktree root): `std::env::current_dir()`
+    // inside the wasm sandbox is not the project directory, so the absolute path it
+    // produced pointed somewhere the emitted binary never ended up.
+    //
+    // A fixed name rather than a UUID, because the extension has no hook that runs
+    // after the debug session ends, so nothing can ever delete these binaries. One
+    // file that gets overwritten beats an unbounded pile of them in the project root.
+    // It is not placed under `.zig-cache/` or `zig-out/` because zig does not create
+    // a missing output directory and would fail the build on a fresh checkout.
+    let mut name = format!(".{ZIG_TEST_EXE_BASENAME}");
     if zed::current_platform().0 == zed::Os::Windows {
         name.push_str(".exe");
     }
-    Some(test_exe_dir.join(name).to_string_lossy().into_owned())
+    Some(name)
 }
 
 zed::register_extension!(ZigExtension);
