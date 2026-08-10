@@ -44,12 +44,21 @@ impl ZigExtension {
             }
         }
 
+        let zig_version = detect_zig_version(worktree);
+
+        // A `zls` on PATH is often installed by a system package manager
+        // (e.g. Arch's `zls` package) and can silently fall behind the
+        // installed Zig version. Trust it only if we can confirm it's
+        // actually compatible with the detected Zig version; otherwise fall
+        // through to downloading a matching build.
         if let Some(path) = worktree.which("zls") {
-            return Ok(ZlsBinary {
-                path,
-                args,
-                environment,
-            });
+            if zls_binary_matches_zig(&path, zig_version.as_deref(), worktree) {
+                return Ok(ZlsBinary {
+                    path,
+                    args,
+                    environment,
+                });
+            }
         }
 
         let arch: &str = match arch {
@@ -70,7 +79,6 @@ impl ZigExtension {
         };
 
         let target = zls_target(arch, os);
-        let zig_version = detect_zig_version(worktree);
         let cache_key = zig_version.clone().unwrap_or_else(|| "latest".to_string());
 
         if let Some(path) = self.cached_zls_paths.get(&cache_key) {
@@ -164,8 +172,13 @@ fn detect_zig_version(worktree: &zed::Worktree) -> Option<String> {
     // env, e.g. version managers like mise/asdf) rather than a bare "zig",
     // so the version we detect matches the binary that will actually run.
     let zig_path = worktree.which("zig")?;
+    binary_version(worktree, &zig_path, "version")
+}
 
-    let mut command = zed::Command::new(zig_path).arg("version");
+// Runs `<path> <version_arg>` and returns its reported version, or `None` if
+// the binary can't be run or its output doesn't look like a version string.
+fn binary_version(worktree: &zed::Worktree, path: &str, version_arg: &str) -> Option<String> {
+    let mut command = zed::Command::new(path).arg(version_arg);
     if matches!(zed::current_platform().0, zed::Os::Mac | zed::Os::Linux) {
         command = command.envs(worktree.shell_env());
     }
@@ -175,10 +188,10 @@ fn detect_zig_version(worktree: &zed::Worktree) -> Option<String> {
         return None;
     }
 
-    parse_zig_version_output(&output.stdout)
+    parse_version_output(&output.stdout)
 }
 
-fn parse_zig_version_output(stdout: &[u8]) -> Option<String> {
+fn parse_version_output(stdout: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(stdout);
     let version = text.lines().map(str::trim).rfind(|line| !line.is_empty())?;
 
@@ -187,6 +200,45 @@ fn parse_zig_version_output(stdout: &[u8]) -> Option<String> {
         .first()
         .filter(|b| b.is_ascii_digit())
         .map(|_| version.to_string())
+}
+
+// Whether a `zls` binary found on PATH should be trusted as-is. ZLS refuses
+// to run against a Zig release outside its own major.minor, so we apply the
+// same rule here to avoid handing Zed a `zls` that will just fail to start.
+// If either version can't be determined, we trust the binary (matches the
+// extension's previous behavior for setups we can't introspect).
+fn zls_binary_matches_zig(path: &str, zig_version: Option<&str>, worktree: &zed::Worktree) -> bool {
+    let Some(zig_version) = zig_version else {
+        return true;
+    };
+
+    match binary_version(worktree, path, "--version") {
+        Some(zls_version) => zls_versions_compatible(zig_version, &zls_version),
+        None => true,
+    }
+}
+
+fn zls_versions_compatible(zig_version: &str, zls_version: &str) -> bool {
+    match (minor_release(zig_version), minor_release(zls_version)) {
+        (Some(zig), Some(zls)) => zig == zls,
+        _ => true,
+    }
+}
+
+fn minor_release(version: &str) -> Option<(u32, u32)> {
+    let mut parts = version.split('.');
+    let major = leading_digits(parts.next()?)?;
+    let minor = leading_digits(parts.next()?)?;
+    Some((major, minor))
+}
+
+fn leading_digits(segment: &str) -> Option<u32> {
+    let digits: String = segment.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse().ok()
+    }
 }
 
 fn latest_asset_url(target: &str, version: &str, extension: &str) -> String {
@@ -471,31 +523,57 @@ mod tests {
     }
 
     #[test]
-    fn parse_zig_version_output_trims_whitespace() {
+    fn parse_version_output_trims_whitespace() {
         assert_eq!(
-            parse_zig_version_output(b"0.16.0\n"),
+            parse_version_output(b"0.16.0\n"),
             Some("0.16.0".to_string())
         );
         assert_eq!(
-            parse_zig_version_output(b"  0.16.0-dev.1458+755a3d957  \n"),
+            parse_version_output(b"  0.16.0-dev.1458+755a3d957  \n"),
             Some("0.16.0-dev.1458+755a3d957".to_string())
         );
-        assert_eq!(parse_zig_version_output(b""), None);
-        assert_eq!(parse_zig_version_output(b"   \n"), None);
+        assert_eq!(parse_version_output(b""), None);
+        assert_eq!(parse_version_output(b"   \n"), None);
     }
 
     #[test]
-    fn parse_zig_version_output_takes_the_last_non_empty_line() {
+    fn parse_version_output_takes_the_last_non_empty_line() {
         // Some shims (mise, asdf, etc.) print a banner before the version.
         assert_eq!(
-            parse_zig_version_output(b"warning: using shim\n0.16.0\n"),
+            parse_version_output(b"warning: using shim\n0.16.0\n"),
             Some("0.16.0".to_string())
         );
     }
 
     #[test]
-    fn parse_zig_version_output_rejects_non_version_text() {
-        assert_eq!(parse_zig_version_output(b"command not found"), None);
+    fn parse_version_output_rejects_non_version_text() {
+        assert_eq!(parse_version_output(b"command not found"), None);
+    }
+
+    #[test]
+    fn minor_release_extracts_major_and_minor() {
+        assert_eq!(minor_release("0.16.0"), Some((0, 16)));
+        assert_eq!(minor_release("0.16.0-dev.74+e0d840bf"), Some((0, 16)));
+        assert_eq!(minor_release("garbage"), None);
+    }
+
+    #[test]
+    fn zls_versions_compatible_rejects_a_zls_behind_zig() {
+        // Reproduces zed-extensions/zig#36 / #38: a system-packaged `zls`
+        // (e.g. Arch's `zls` 0.15.1) sitting on PATH while Zig has moved to 0.16.
+        assert!(!zls_versions_compatible("0.16.0", "0.15.1"));
+    }
+
+    #[test]
+    fn zls_versions_compatible_accepts_matching_minor_release() {
+        assert!(zls_versions_compatible("0.16.0", "0.16.0"));
+        assert!(zls_versions_compatible("0.16.0-dev.74+e0d840bf", "0.16.1"));
+    }
+
+    #[test]
+    fn zls_versions_compatible_trusts_unparsable_versions() {
+        assert!(zls_versions_compatible("0.16.0", "not-a-version"));
+        assert!(zls_versions_compatible("not-a-version", "0.16.0"));
     }
 
     #[test]
