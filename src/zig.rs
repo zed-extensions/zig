@@ -1,10 +1,13 @@
-use std::{fs, path::Path};
+use std::{collections::HashMap, fs, path::Path};
 use zed_extension_api::{self as zed, serde_json, settings::LspSettings, LanguageServerId, Result};
 
 const ZIG_TEST_EXE_BASENAME: &str = "zig_test";
 
 struct ZigExtension {
-    cached_binary_path: Option<String>,
+    // Keyed by the detected `zig version` string (or "latest" when no zig
+    // binary is on the worktree's PATH), since different worktrees may use
+    // different Zig toolchains and therefore need different ZLS builds.
+    cached_zls_paths: HashMap<String, String>,
 }
 
 #[derive(Clone)]
@@ -41,38 +44,22 @@ impl ZigExtension {
             }
         }
 
-        if let Some(path) = worktree.which("zls") {
-            return Ok(ZlsBinary {
-                path,
-                args,
-                environment,
-            });
-        }
+        let zig_version = detect_zig_version(worktree);
 
-        if let Some(path) = &self.cached_binary_path {
-            if fs::metadata(path).is_ok_and(|stat| stat.is_file()) {
+        // A `zls` on PATH is often installed by a system package manager
+        // (e.g. Arch's `zls` package) and can silently fall behind the
+        // installed Zig version. Trust it only if we can confirm it's
+        // actually compatible with the detected Zig version; otherwise fall
+        // through to downloading a matching build.
+        if let Some(path) = worktree.which("zls") {
+            if zls_binary_matches_zig(&path, zig_version.as_deref(), worktree) {
                 return Ok(ZlsBinary {
-                    path: path.clone(),
+                    path,
                     args,
                     environment,
                 });
             }
         }
-
-        zed::set_language_server_installation_status(
-            language_server_id,
-            &zed::LanguageServerInstallationStatus::CheckingForUpdate,
-        );
-
-        // Note that in github releases and on zlstools.org the tar.gz asset is not shown
-        // but is available at https://builds.zigtools.org/zls-{os}-{arch}-{version}.tar.gz
-        let release = zed::latest_github_release(
-            "zigtools/zls",
-            zed::GithubReleaseOptions {
-                require_assets: true,
-                pre_release: false,
-            },
-        )?;
 
         let arch: &str = match arch {
             zed::Architecture::Aarch64 => "aarch64",
@@ -91,10 +78,34 @@ impl ZigExtension {
             zed::Os::Windows => "zip",
         };
 
-        let asset_name: String = format!("zls-{}-{}-{}.{}", arch, os, release.version, extension);
-        let download_url = format!("https://builds.zigtools.org/{}", asset_name);
+        let target = zls_target(arch, os);
+        let cache_key = zig_version.clone().unwrap_or_else(|| "latest".to_string());
 
-        let version_dir = format!("zls-{}", release.version);
+        if let Some(path) = self.cached_zls_paths.get(&cache_key) {
+            if fs::metadata(path).is_ok_and(|stat| stat.is_file()) {
+                return Ok(ZlsBinary {
+                    path: path.clone(),
+                    args,
+                    environment,
+                });
+            }
+        }
+
+        zed::set_language_server_installation_status(
+            language_server_id,
+            &zed::LanguageServerInstallationStatus::CheckingForUpdate,
+        );
+
+        // ZLS enforces that its own version matches the Zig toolchain it runs
+        // against, so we must pick the ZLS build released for the Zig version
+        // that's actually installed rather than always grabbing the latest
+        // ZLS release (see zigtools/zls select-version API).
+        let (version, download_url) = match &zig_version {
+            Some(zig_version) => matching_zls_release(zig_version, &target)?,
+            None => latest_zls_release(&target, extension)?,
+        };
+
+        let version_dir = format!("zls-{}", version);
         let binary_path = match platform {
             zed::Os::Mac | zed::Os::Linux => format!("{version_dir}/zls"),
             zed::Os::Windows => format!("{version_dir}/zls.exe"),
@@ -117,18 +128,11 @@ impl ZigExtension {
             .map_err(|e| format!("failed to download file: {e}"))?;
 
             zed::make_file_executable(&binary_path)?;
-
-            let entries =
-                fs::read_dir(".").map_err(|e| format!("failed to list working directory {e}"))?;
-            for entry in entries {
-                let entry = entry.map_err(|e| format!("failed to load directory entry {e}"))?;
-                if entry.file_name().to_str() != Some(&version_dir) {
-                    fs::remove_dir_all(entry.path()).ok();
-                }
-            }
         }
 
-        self.cached_binary_path = Some(binary_path.clone());
+        self.cached_zls_paths.insert(cache_key, binary_path.clone());
+        prune_stale_zls_dirs(self.cached_zls_paths.values());
+
         Ok(ZlsBinary {
             path: binary_path,
             args,
@@ -137,10 +141,192 @@ impl ZigExtension {
     }
 }
 
+// Removes `zls-*` directories that are no longer referenced by any cached
+// binary path for this session. Different worktrees may use different Zig
+// versions and thus need different ZLS builds concurrently, so we can't just
+// wipe everything but the version we most recently downloaded.
+fn prune_stale_zls_dirs<'a>(keep_paths: impl Iterator<Item = &'a String>) {
+    let keep: std::collections::HashSet<&str> = keep_paths
+        .filter_map(|path| path.split('/').next())
+        .collect();
+
+    let Ok(entries) = fs::read_dir(".") else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if name.starts_with("zls-") && !keep.contains(name.as_str()) {
+            fs::remove_dir_all(entry.path()).ok();
+        }
+    }
+}
+
+fn zls_target(arch: &str, os: &str) -> String {
+    format!("{arch}-{os}")
+}
+
+fn detect_zig_version(worktree: &zed::Worktree) -> Option<String> {
+    // Use the path `which` actually resolved (respecting the worktree's shell
+    // env, e.g. version managers like mise/asdf) rather than a bare "zig",
+    // so the version we detect matches the binary that will actually run.
+    let zig_path = worktree.which("zig")?;
+    binary_version(worktree, &zig_path, "version")
+}
+
+// Runs `<path> <version_arg>` and returns its reported version, or `None` if
+// the binary can't be run or its output doesn't look like a version string.
+fn binary_version(worktree: &zed::Worktree, path: &str, version_arg: &str) -> Option<String> {
+    let mut command = zed::Command::new(path).arg(version_arg);
+    if matches!(zed::current_platform().0, zed::Os::Mac | zed::Os::Linux) {
+        command = command.envs(worktree.shell_env());
+    }
+
+    let output = command.output().ok()?;
+    if !matches!(output.status, Some(0)) {
+        return None;
+    }
+
+    parse_version_output(&output.stdout)
+}
+
+fn parse_version_output(stdout: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(stdout);
+    let version = text.lines().map(str::trim).rfind(|line| !line.is_empty())?;
+
+    version
+        .as_bytes()
+        .first()
+        .filter(|b| b.is_ascii_digit())
+        .map(|_| version.to_string())
+}
+
+// Whether a `zls` binary found on PATH should be trusted as-is. ZLS refuses
+// to run against a Zig release outside its own major.minor, so we apply the
+// same rule here to avoid handing Zed a `zls` that will just fail to start.
+// If either version can't be determined, we trust the binary (matches the
+// extension's previous behavior for setups we can't introspect).
+fn zls_binary_matches_zig(path: &str, zig_version: Option<&str>, worktree: &zed::Worktree) -> bool {
+    let Some(zig_version) = zig_version else {
+        return true;
+    };
+
+    match binary_version(worktree, path, "--version") {
+        Some(zls_version) => zls_versions_compatible(zig_version, &zls_version),
+        None => true,
+    }
+}
+
+fn zls_versions_compatible(zig_version: &str, zls_version: &str) -> bool {
+    match (minor_release(zig_version), minor_release(zls_version)) {
+        (Some(zig), Some(zls)) => zig == zls,
+        _ => true,
+    }
+}
+
+fn minor_release(version: &str) -> Option<(u32, u32)> {
+    let mut parts = version.split('.');
+    let major = leading_digits(parts.next()?)?;
+    let minor = leading_digits(parts.next()?)?;
+    Some((major, minor))
+}
+
+fn leading_digits(segment: &str) -> Option<u32> {
+    let digits: String = segment.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse().ok()
+    }
+}
+
+fn latest_asset_url(target: &str, version: &str, extension: &str) -> String {
+    format!("https://builds.zigtools.org/zls-{target}-{version}.{extension}")
+}
+
+fn latest_zls_release(target: &str, extension: &str) -> Result<(String, String), String> {
+    let release = zed::latest_github_release(
+        "zigtools/zls",
+        zed::GithubReleaseOptions {
+            require_assets: true,
+            pre_release: false,
+        },
+    )?;
+
+    let download_url = latest_asset_url(target, &release.version, extension);
+
+    Ok((release.version, download_url))
+}
+
+fn matching_zls_release(zig_version: &str, target: &str) -> Result<(String, String), String> {
+    let request = zed::http_client::HttpRequest::builder()
+        .url(select_version_request_url(zig_version))
+        .method(zed::http_client::HttpMethod::Get)
+        .build()?;
+    let response = request.fetch()?;
+
+    parse_zls_release(&response.body, target)
+}
+
+fn percent_encode(input: &str) -> String {
+    let mut encoded = String::with_capacity(input.len());
+    for byte in input.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(byte as char)
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
+fn select_version_request_url(zig_version: &str) -> String {
+    format!(
+        "https://releases.zigtools.org/v1/zls/select-version?zig_version={}&compatibility=only-runtime",
+        percent_encode(zig_version)
+    )
+}
+
+// Parses the response of https://releases.zigtools.org/v1/zls/select-version,
+// which reports the newest ZLS release whose runtime is compatible with the
+// given Zig version, and returns its version and the tarball URL for `target`
+// (e.g. "x86_64-linux").
+fn parse_zls_release(body: &[u8], target: &str) -> Result<(String, String), String> {
+    let payload: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|e| format!("failed to parse ZLS release info: {e}"))?;
+
+    // The select-version endpoint reports errors (e.g. "no ZLS release for
+    // this Zig version yet") as a 200 response with a `message`/`error`
+    // field instead of an HTTP error status, so check for those first.
+    if let Some(message) = payload
+        .get("message")
+        .or_else(|| payload.get("error"))
+        .and_then(|v| v.as_str())
+    {
+        return Err(format!("zigtools/zls select-version: {message}"));
+    }
+
+    let version = payload
+        .get("version")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "ZLS release info is missing a `version` field".to_string())?
+        .to_string();
+
+    let tarball = payload
+        .get(target)
+        .and_then(|asset| asset.get("tarball"))
+        .and_then(|t| t.as_str())
+        .ok_or_else(|| format!("no ZLS release available for target `{target}`"))?;
+
+    Ok((version, tarball.replace(".tar.xz", ".tar.gz")))
+}
+
 impl zed::Extension for ZigExtension {
     fn new() -> Self {
         Self {
-            cached_binary_path: None,
+            cached_zls_paths: HashMap::new(),
         }
     }
 
@@ -309,3 +495,142 @@ fn get_test_exe_path() -> Option<String> {
 }
 
 zed::register_extension!(ZigExtension);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zls_target_combines_arch_and_os() {
+        assert_eq!(zls_target("x86_64", "linux"), "x86_64-linux");
+    }
+
+    #[test]
+    fn percent_encode_escapes_reserved_characters() {
+        assert_eq!(
+            percent_encode("0.16.0-dev.74+e0d840bf"),
+            "0.16.0-dev.74%2Be0d840bf"
+        );
+    }
+
+    #[test]
+    fn select_version_request_url_encodes_the_zig_version() {
+        let url = select_version_request_url("0.16.0-dev.74+e0d840bf");
+        assert_eq!(
+            url,
+            "https://releases.zigtools.org/v1/zls/select-version?zig_version=0.16.0-dev.74%2Be0d840bf&compatibility=only-runtime"
+        );
+    }
+
+    #[test]
+    fn parse_version_output_trims_whitespace() {
+        assert_eq!(
+            parse_version_output(b"0.16.0\n"),
+            Some("0.16.0".to_string())
+        );
+        assert_eq!(
+            parse_version_output(b"  0.16.0-dev.1458+755a3d957  \n"),
+            Some("0.16.0-dev.1458+755a3d957".to_string())
+        );
+        assert_eq!(parse_version_output(b""), None);
+        assert_eq!(parse_version_output(b"   \n"), None);
+    }
+
+    #[test]
+    fn parse_version_output_takes_the_last_non_empty_line() {
+        // Some shims (mise, asdf, etc.) print a banner before the version.
+        assert_eq!(
+            parse_version_output(b"warning: using shim\n0.16.0\n"),
+            Some("0.16.0".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_version_output_rejects_non_version_text() {
+        assert_eq!(parse_version_output(b"command not found"), None);
+    }
+
+    #[test]
+    fn minor_release_extracts_major_and_minor() {
+        assert_eq!(minor_release("0.16.0"), Some((0, 16)));
+        assert_eq!(minor_release("0.16.0-dev.74+e0d840bf"), Some((0, 16)));
+        assert_eq!(minor_release("garbage"), None);
+    }
+
+    #[test]
+    fn zls_versions_compatible_rejects_a_zls_behind_zig() {
+        // Reproduces zed-extensions/zig#36 / #38: a system-packaged `zls`
+        // (e.g. Arch's `zls` 0.15.1) sitting on PATH while Zig has moved to 0.16.
+        assert!(!zls_versions_compatible("0.16.0", "0.15.1"));
+    }
+
+    #[test]
+    fn zls_versions_compatible_accepts_matching_minor_release() {
+        assert!(zls_versions_compatible("0.16.0", "0.16.0"));
+        assert!(zls_versions_compatible("0.16.0-dev.74+e0d840bf", "0.16.1"));
+    }
+
+    #[test]
+    fn zls_versions_compatible_trusts_unparsable_versions() {
+        assert!(zls_versions_compatible("0.16.0", "not-a-version"));
+        assert!(zls_versions_compatible("not-a-version", "0.16.0"));
+    }
+
+    #[test]
+    fn latest_asset_url_matches_the_zigtools_naming_scheme() {
+        assert_eq!(
+            latest_asset_url("x86_64-linux", "0.16.0", "tar.gz"),
+            "https://builds.zigtools.org/zls-x86_64-linux-0.16.0.tar.gz"
+        );
+    }
+
+    #[test]
+    fn parse_zls_release_extracts_version_and_tarball_for_target() {
+        let body = br#"{"version":"0.16.0","date":"2026-04-16","x86_64-linux":{"tarball":"https://builds.zigtools.org/zls-x86_64-linux-0.16.0.tar.xz","shasum":"abc","size":"123"}}"#;
+
+        let (version, tarball) = parse_zls_release(body, "x86_64-linux").unwrap();
+
+        assert_eq!(version, "0.16.0");
+        assert_eq!(
+            tarball,
+            "https://builds.zigtools.org/zls-x86_64-linux-0.16.0.tar.gz"
+        );
+    }
+
+    #[test]
+    fn parse_zls_release_errors_when_target_is_missing() {
+        let body = br#"{"version":"0.16.0","aarch64-macos":{"tarball":"foo"}}"#;
+
+        let err = parse_zls_release(body, "x86_64-linux").unwrap_err();
+
+        assert!(err.contains("x86_64-linux"));
+    }
+
+    #[test]
+    fn parse_zls_release_errors_on_invalid_json() {
+        assert!(parse_zls_release(b"not json", "x86_64-linux").is_err());
+    }
+
+    #[test]
+    fn parse_zls_release_surfaces_api_reported_errors() {
+        let body = br#"{"code":3,"message":"ZLS 9.9 has not been released yet"}"#;
+        let err = parse_zls_release(body, "x86_64-linux").unwrap_err();
+        assert!(err.contains("ZLS 9.9 has not been released yet"));
+
+        let body = br#"{"error":"'9.9' is not a valid version!"}"#;
+        let err = parse_zls_release(body, "x86_64-linux").unwrap_err();
+        assert!(err.contains("is not a valid version"));
+    }
+
+    #[test]
+    fn parse_zls_release_preserves_windows_zip_extension() {
+        let body = br#"{"version":"0.16.0","x86_64-windows":{"tarball":"https://builds.zigtools.org/zls-x86_64-windows-0.16.0.zip"}}"#;
+
+        let (_, tarball) = parse_zls_release(body, "x86_64-windows").unwrap();
+
+        assert_eq!(
+            tarball,
+            "https://builds.zigtools.org/zls-x86_64-windows-0.16.0.zip"
+        );
+    }
+}

@@ -15,3 +15,8 @@ repository = "https://github.com/tree-sitter-grammars/tree-sitter-zig"
 commit = "6479aa13f32f701c383083d8b28360ebd682fb7d"
 
 [debug_locators.zig-locator]
+
+[[capabilities]]
+kind = "process:exec"
+command = "zig"
+args = ["version"]
