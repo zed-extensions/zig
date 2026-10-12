@@ -200,9 +200,9 @@ impl zed::Extension for ZigExtension {
                 let mut args: Vec<String> = build_task
                     .args
                     .into_iter()
-                    // TODO verify if this is required on non-Windows platforms
-                    .map(|s| s.replace("\"", "'"))
+                    .map(|s| s.trim_matches(['\"', '\'']).to_string())
                     .collect();
+                args.push("-fllvm".into());
                 args.push("--test-no-exec".into());
                 args.push(format!("-femit-bin={test_exe_path}"));
 
@@ -224,7 +224,11 @@ impl zed::Extension for ZigExtension {
             _ => return None,
         };
 
-        let config = serde_json::Value::Null;
+        let config = serde_json::json!({
+            "initCommands": [
+                "settings set target.inline-breakpoint-strategy always"
+            ],
+        });
         let Ok(config) = serde_json::to_string(&config) else {
             return None;
         };
@@ -269,17 +273,11 @@ impl zed::Extension for ZigExtension {
                 let program = build_task
                     .args
                     .iter()
-                    .find_map(|arg| {
-                        arg.strip_prefix("-femit-bin=").map(|arg| {
-                            arg.split("=")
-                                .nth(1)
-                                .ok_or("Expected binary path in -femit-bin=")
-                                .map(|path| path.trim_end_matches(".exe"))
-                        })
-                    })
-                    .ok_or("Failed to extract binary path from command args")
-                    .flatten()?
+                    .find_map(|arg| arg.strip_prefix("-femit-bin="))
+                    .ok_or("Failed to extract binary path from command args")?
+                    .trim_end_matches(".exe")
                     .to_string();
+
                 let request = zed::LaunchRequest {
                     program,
                     cwd: build_task.cwd,
